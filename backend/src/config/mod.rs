@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use toml;
 
-pub const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 1;
 
 #[derive(Deserialize, Serialize, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -29,42 +29,42 @@ pub struct AppConfig {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PathConfig {
-    data_dir: PathBuf,
-    pub_dir: PathBuf,
-    log_dir: PathBuf,
-    tmp_dir: PathBuf,
-    run_dir: PathBuf,
+    pub data_dir: PathBuf,
+    pub pub_dir: PathBuf,
+    pub log_dir: PathBuf,
+    pub tmp_dir: PathBuf,
+    pub run_dir: PathBuf,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct TimeConfig {
-    timezone: Tz,
+    pub timezone: Tz,
 }
 
 #[serde_as]
 #[derive(Deserialize, Serialize, Debug)]
 pub struct RetryConfig {
-    max_attempts: u32,
+    pub max_attempts: u32,
     #[serde(rename = "first-backoff-secs")]
     #[serde_as(as = "DurationSeconds<i64>")]
-    first_backoff_dur: Duration,
+    pub first_backoff_dur: Duration,
     #[serde(rename = "max-backoff-secs")]
     #[serde_as(as = "DurationSeconds<i64>")]
-    max_backoff_dur: Duration,
+    pub max_backoff_dur: Duration,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct PublishConfig {
-    driver: PublishDriver,
-    keep_generations: u32,
+    pub driver: PublishDriver,
+    pub keep_generations: u32,
     #[serde(default)]
-    symlink: Option<SymlinkPublishConfig>,
+    pub symlink: Option<SymlinkPublishConfig>,
     #[serde(default)]
-    btrfs: Option<BtrfsPublishConfig>,
+    pub btrfs: Option<BtrfsPublishConfig>,
 }
 
 impl PublishConfig {
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self) -> Result<(), ConfigError> {
         match self.driver {
             PublishDriver::Symlink => {
                 if self.symlink.is_none() {
@@ -89,12 +89,12 @@ impl PublishConfig {
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct SymlinkPublishConfig {
-    snapshot_dir: PathBuf,
+    pub snapshot_dir: PathBuf,
 }
 
 #[derive(Deserialize, Serialize, Debug, Default)]
 pub struct BtrfsPublishConfig {
-    subvolume_path: PathBuf,
+    pub subvolume_path: PathBuf,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -106,14 +106,14 @@ pub enum PublishDriver {
 #[serde_as]
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DbConfig {
-    sqlite_path: PathBuf,
+    pub sqlite_path: PathBuf,
     #[serde(rename = "busy-timeout-ms")]
     #[serde_as(as = "DurationMilliSeconds<i64>")]
-    busy_timeout: Duration,
+    pub busy_timeout: Duration,
     #[serde(default)]
-    journal_mode: DbJournalMode,
+    pub journal_mode: DbJournalMode,
     #[serde(default)]
-    synchronous: DbSynchronous,
+    pub synchronous: DbSynchronous,
 }
 
 impl DbConfig {
@@ -163,11 +163,11 @@ impl Default for DbSynchronous {
 #[serde_as]
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ApiConfig {
-    bind: SocketAddr,
+    pub bind: SocketAddr,
     #[serde_as(as = "DurationSeconds<i64>")]
     #[serde(rename = "request-timeout-secs")]
-    request_timeout: Duration,
-    access_log: bool,
+    pub request_timeout: Duration,
+    pub access_log: bool,
 }
 
 impl ApiConfig {
@@ -184,13 +184,13 @@ impl ApiConfig {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ManagerConfig {
-    readonly_mode: bool,
-    config_reload_watch: bool,
+    pub readonly_mode: bool,
+    pub config_reload_watch: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct WorkerConfig {
-    worker_num: u64,
+    pub worker_num: u64,
 }
 
 #[serde_as]
@@ -198,12 +198,12 @@ pub struct WorkerConfig {
 pub struct ShutdownConfig {
     #[serde_as(as = "DurationSeconds<i64>")]
     #[serde(rename = "grace-period-secs")]
-    grace_period: Duration,
+    pub grace_period: Duration,
     #[serde_as(as = "DurationSeconds<i64>")]
     #[serde(rename = "force-kill-after-secs")]
-    force_kill_limit: Duration,
+    pub force_kill_limit: Duration,
     #[serde(rename = "publish-is-non-interruptible")]
-    publish_non_stopable: bool,
+    pub publish_non_stopable: bool,
 }
 
 impl ShutdownConfig {
@@ -233,14 +233,14 @@ impl ShutdownConfig {
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MirrorConfig {
-    id: String,
+    pub id: String,
     #[serde(rename = "interval-secs")]
     #[serde_as(as = "DurationSeconds<i64>")]
-    interval: Duration,
+    pub interval: Duration,
     #[serde(default)]
-    keep_generations: Option<u32>,
-    provider: Provider,
-    provider_config: ProviderConfig,
+    pub keep_generations: Option<u32>,
+    pub provider: Provider,
+    pub provider_config: ProviderConfig,
 }
 
 impl MirrorConfig {
@@ -275,12 +275,12 @@ pub enum Provider {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ProviderConfig {
-    source: String,
-    args: Vec<String>,
+    pub source: String,
+    pub args: Vec<String>,
 }
 
 impl ProviderConfig {
-    pub fn validate(&self, provider: &Provider) -> Result<(), ConfigError> {
+    fn validate(&self, provider: &Provider) -> Result<(), ConfigError> {
         if self.source.trim().is_empty() {
             return Err(ConfigError::InvalidField {
                 field: "mirrors.provider-config.source",
@@ -352,7 +352,13 @@ pub struct ConfigLoadOptions {
     config_path: PathBuf,
 }
 
-pub fn load_raw_config(path: &Path) -> Result<AppConfig, ConfigError> {
+impl ConfigLoadOptions {
+    pub fn new(config_path: PathBuf) -> Self {
+        Self { config_path }
+    }
+}
+
+fn load_raw_config(path: &Path) -> Result<AppConfig, ConfigError> {
     if path.as_os_str().is_empty() {
         return Err(ConfigError::SourceUnavailable(
             "empty config path".to_string(),
@@ -371,7 +377,7 @@ pub fn load_raw_config(path: &Path) -> Result<AppConfig, ConfigError> {
     Ok(parsed)
 }
 
-pub fn apply_env_overrides(mut _cfg: AppConfig) -> Result<AppConfig, ConfigError> {
+fn apply_env_overrides(mut _cfg: AppConfig) -> Result<AppConfig, ConfigError> {
     // TODO: 把环境变量确定下来之后用这个方法读取并覆盖，目前直接透明传递
     Ok(_cfg)
 }
