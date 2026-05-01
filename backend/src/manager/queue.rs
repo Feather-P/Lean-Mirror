@@ -63,8 +63,14 @@ impl JobQueue {
         }
     }
 
+    /// 获取任务队列中下一个任务的规划执行时间
+    ///
+    /// 如果队列已空，则会返回 'None'
     pub fn peek_time(&self) -> Option<DateTime<Utc>> {
-        self.time_index.iter().next().map(|scheduled| scheduled.time)
+        self.time_index
+            .iter()
+            .next()
+            .map(|scheduled| scheduled.time)
     }
 
     pub fn dequeue(&mut self) -> Option<(Arc<str>, DateTime<Utc>)> {
