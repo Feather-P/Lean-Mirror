@@ -1,0 +1,60 @@
+version = 1
+
+[path]
+data_dir = "./data"
+pub_dir = "./public"
+log_dir = "./logs"
+tmp_dir = "./tmp"
+run_dir = "./run"
+
+[time]
+timezone = "Asia/Shanghai"
+
+[database]
+sqlite_path = "./data/lean-mirror.db"
+busy-timeout-ms = 5000
+journal_mode = "wal"
+synchronous = "normal"
+
+[api]
+bind = "127.0.0.1:8080"
+request-timeout-secs = 15
+access_log = true
+
+[manager]
+readonly_mode = false
+config_reload_watch = true
+
+[worker]
+worker_num = 4
+
+[shutdown]
+grace-period-secs = 30
+force-kill-after-secs = 120
+publish-is-non-interruptible = true
+
+[publish]
+driver = "symlink"
+keep_generations = 3
+
+[publish.symlink]
+snapshot_dir = "./snapshots"
+
+[[mirrors]]
+id = "rustup-dist"
+interval-secs = 3600
+provider = "http"
+
+[mirrors.provider_config]
+source = "https://static.rust-lang.org"
+args = ["--recursive"]
+
+[[mirrors]]
+id = "git-mirror-example"
+interval-secs = 1800
+keep_generations = 5
+provider = "git"
+
+[mirrors.provider_config]
+source = "https://github.com/rust-lang/rust.git"
+args = ["--depth=1"]
