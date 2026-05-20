@@ -14,12 +14,18 @@ pub struct Failed;
 
 // 调度运行状态
 #[derive(Debug, Clone)]
+/// 任务存在，但尚未被调度系统登记进入队列
 pub struct Idle;
 #[derive(Debug, Clone)]
+/// 任务存在且被调度进入队列等待执行
+pub struct Pending;
+#[derive(Debug, Clone)]
+/// 任务正在运行
 pub struct Running<Business> {
     pub business_status: Business,
 }
 #[derive(Debug, Clone)]
+/// 任务存在，且被暂停
 pub struct Paused;
 
 #[derive(Debug, Clone)]
@@ -40,6 +46,7 @@ impl<Biz: Default> Default for Running<Biz> {
 #[derive(Debug, Clone)]
 pub enum AnyJob {
     Idle(Job<Idle>),
+    Pending(Job<Pending>),
     Syncing(Job<Running<Syncing>>),
     Verifying(Job<Running<Verifying>>),
     Publishing(Job<Running<Publishing>>),
@@ -55,7 +62,7 @@ pub enum Effect {
     /// 将任务从调度队列中移除
     QueueRemove { mirror_id: Arc<str> },
     /// 立刻触发 Worker 执行
-    DispatchRunNow { mirror_id: Arc<str> },
+    DispatchRun { mirror_id: Arc<str> },
     /// 持久化任务状态
     Persist { mirror_id: Arc<str> },
 }
@@ -66,6 +73,9 @@ pub struct TransitionPlan<NextSt> {
     pub effects: Vec<Effect>,
 }
 
+/// # 任务状态机转移计划
+/// 
+/// 任务状态机的转移应消耗转移计划
 impl<NextSt> TransitionPlan<NextSt> {
     pub fn new(next: Job<NextSt>) -> Self {
         Self {
@@ -89,6 +99,7 @@ impl AnyJob {
     pub fn state_name(&self) -> &'static str {
         match self {
             AnyJob::Idle(_) => "Idle",
+            AnyJob::Pending(_) => "Pending",
             AnyJob::Syncing(_) => "Syncing",
             AnyJob::Verifying(_) => "Verifying",
             AnyJob::Publishing(_) => "Publishing",
@@ -96,6 +107,54 @@ impl AnyJob {
             AnyJob::Failed(_) => "Failed",
             AnyJob::Paused(_) => "Paused",
         }
+    }
+}
+
+impl From<Job<Idle>> for AnyJob {
+    fn from(job: Job<Idle>) -> Self {
+        AnyJob::Idle(job)
+    }
+}
+
+impl From<Job<Pending>> for AnyJob {
+    fn from(job: Job<Pending>) -> Self {
+        AnyJob::Pending(job)
+    }
+}
+
+impl From<Job<Running<Syncing>>> for AnyJob {
+    fn from(job: Job<Running<Syncing>>) -> Self {
+        AnyJob::Syncing(job)
+    }
+}
+
+impl From<Job<Running<Verifying>>> for AnyJob {
+    fn from(job: Job<Running<Verifying>>) -> Self {
+        AnyJob::Verifying(job)
+    }
+}
+
+impl From<Job<Running<Publishing>>> for AnyJob {
+    fn from(job: Job<Running<Publishing>>) -> Self {
+        AnyJob::Publishing(job)
+    }
+}
+
+impl From<Job<Running<Success>>> for AnyJob {
+    fn from(job: Job<Running<Success>>) -> Self {
+        AnyJob::Success(job)
+    }
+}
+
+impl From<Job<Running<Failed>>> for AnyJob {
+    fn from(job: Job<Running<Failed>>) -> Self {
+        AnyJob::Failed(job)
+    }
+}
+
+impl From<Job<Paused>> for AnyJob {
+    fn from(job: Job<Paused>) -> Self {
+        AnyJob::Paused(job)
     }
 }
 
@@ -108,17 +167,15 @@ pub trait Failable {
 }
 
 impl Job<Idle> {
-    /// 将任务从空闲状态推进到同步中状态。
+    /// 将任务从空闲状态注册进任务队列。
     ///
     /// 会记录最新状态到持久化存储。
-    pub fn sync(self) -> TransitionPlan<Running<Syncing>> {
+    pub fn register(self) -> TransitionPlan<Pending> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Syncing>> {
+        let next = Job::<Pending> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Syncing,
-            },
+            running_status: Pending
         };
         let effects = vec![Effect::Persist {
             mirror_id: mirror_id,
@@ -147,6 +204,32 @@ impl Suspendable for Job<Idle> {
             Effect::Persist {
                 mirror_id: mirror_id,
             },
+        ];
+
+        TransitionPlan::new(next).with_effects(effects)
+    }
+}
+
+impl Job<Pending> {
+    /// 将任务从任务队列里移出，进入执行器执行
+    /// 
+    /// 并持久化任务状态
+    pub fn execute(self) -> TransitionPlan<Running<Syncing>> {
+        let mirror_id = self.mirror_id;
+
+        let next = Job::<Running<Syncing>> {
+            mirror_id: mirror_id.clone(),
+            running_status: Running {
+                business_status: Syncing
+            }
+        };
+        let effects = vec![
+            Effect::DispatchRun {
+                mirror_id: mirror_id.clone()
+            },
+            Effect::Persist {
+                mirror_id
+            }
         ];
 
         TransitionPlan::new(next).with_effects(effects)
@@ -341,4 +424,8 @@ impl Job<Paused> {
 
         TransitionPlan::new(next).with_effects(effects)
     }
+}
+
+pub trait TransitExecutor {
+    
 }

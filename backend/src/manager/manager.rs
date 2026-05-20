@@ -2,12 +2,12 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::manager::event::LifeCycleEvent;
 
+use super::error::ManagerError;
 use super::event::{ControlEvent, WorkerCommand, WorkerEvent};
 use super::queue::JobQueue;
 use super::status::AnyJob;
@@ -68,7 +68,7 @@ impl Manager {
                     };
 
 
-                    self.handle_control_event(control_event)?;
+                    self.handle_control_event(control_event).await?;
                 }
                 maybe_worker_event = self.worker_event_rx.recv() => {
                     let Some(worker_event) = maybe_worker_event
@@ -94,7 +94,7 @@ impl Manager {
     }
 
     /// 处理上游网页或命令行前端发来的业务控制事件，更新任务状态机，重新安排任务队列，
-    fn handle_control_event(
+    async fn handle_control_event(
         &mut self,
         control_event: ControlEvent,
     ) -> Result<(), ManagerError> {
@@ -107,24 +107,35 @@ impl Manager {
                 );
             }
             ControlEvent::Pause { mirror_id } => {
-                todo!(
-                    "对除了Paused之外的状态都有效，让这个Worker在完成本轮worker同步之后进入Pause状态，
-                    以后就不入队了"
-                )
+                let Some(any_job) = self.jobs.remove(mirror_id.as_str()) else {
+                    return Err(ManagerError::JobNotFound {
+                        job_mirror_id: &mirror_id,
+                    });
+                };
+
+                match any_job {
+                    // 这里是目前分支处理的baseline，其他分支也按此处方式处理
+                    AnyJob::Paused(job) => {
+                        self.jobs.insert(mirror_id.into(), job.into());
+                        Ok(())
+                    }
+                    AnyJob::Pending(job) => self.apply_plan(job.pause()).await,
+                    AnyJob::Idle(job) => todo!(),
+                    AnyJob::Syncing(job) => todo!(),
+                    AnyJob::Verifying(job) => todo!(),
+                    AnyJob::Publishing(job) => todo!(),
+                    AnyJob::Success(job) => todo!(),
+                    AnyJob::Failed(job) => todo!(),
+                }
             }
             ControlEvent::Resume { mirror_id } => {
-                todo!(
-                    "仅对paused状态的任务有效，把任务标记为Success，然后再入队"
-                )
+                todo!("仅对paused状态的任务有效，把任务标记为Success，然后再入队")
             }
         }
     }
 
     /// 处理 'worker' 上报的事件信息，并根据信息更新任务状态机、队列，和持久化
-    fn handle_worker_event(
-        &mut self,
-        worker_event: WorkerEvent,
-    ) -> Result<(), ManagerError> {
+    fn handle_worker_event(&mut self, worker_event: WorkerEvent) -> Result<(), ManagerError> {
         todo!("还没有实现")
     }
 
@@ -147,12 +158,6 @@ impl Manager {
 
         Ok(())
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ManagerError {
-    #[error("{channel_name} channel is closed")]
-    ChannelClosed { channel_name: &'static str },
 }
 
 /// 将 'chrono::DateTime<Utc>' 时间转换为 'tokio::time::instant
