@@ -122,22 +122,32 @@ impl Manager {
                         self.jobs.insert(mirror_id.into(), job.into());
                         Ok(())
                     }
-                    AnyJob::Pending(job) => self.apply_plan(job.pause()).await,
-                    AnyJob::Idle(_) => {
-                        return Err(ManagerError::InvalidTransition {
-                            from: "Idle".into(),
-                            to: "Paused".into(),
-                        });
-                    }
+                    AnyJob::Init(job) => self.apply_plan(job.pause()).await,
                     AnyJob::Syncing(job) => todo!(),
                     AnyJob::Verifying(job) => todo!(),
                     AnyJob::Publishing(job) => todo!(),
-                    AnyJob::Success(job) => todo!(),
-                    AnyJob::Failed(job) => todo!(),
+                    AnyJob::Success(job) => self.apply_plan(job.pause()).await,
+                    AnyJob::Failed(job) => self.apply_plan(job.pause()).await,
                 }
             }
             ControlEvent::Resume { mirror_id } => {
-                todo!("仅对paused状态的任务有效，把任务标记为Success，然后再入队")
+                let Some(any_job) = self.jobs.remove(mirror_id.as_str()) else {
+                    return Err(ManagerError::JobNotFound {
+                        job_mirror_id: mirror_id.into(),
+                    });
+                };
+
+                match any_job {
+                    AnyJob::Paused(job) => self.apply_plan(job.resume()).await,
+                    job => {
+                        let from = job.state_name().to_string();
+                        self.jobs.insert(mirror_id.into(), job);
+                        Err(ManagerError::InvalidTransition {
+                            from,
+                            to: "Init".into(),
+                        })
+                    }
+                }
             }
         }
     }

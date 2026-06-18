@@ -16,52 +16,33 @@ pub struct Success;
 #[derive(Debug, Clone)]
 pub struct Failed;
 
-/// 表示任务已存在，但尚未进入调度队列的运行状态标记。
+/// 表示任务刚创建完成、尚未进入过任何处理流程的初始状态。
 #[derive(Debug, Clone)]
-pub struct Idle;
-/// 表示任务已登记到调度队列、等待执行的运行状态标记。
-#[derive(Debug, Clone)]
-pub struct Pending;
-/// 表示任务当前正在执行某个业务阶段的运行状态。
-#[derive(Debug, Clone)]
-pub struct Running<Business> {
-    /// 当前运行阶段对应的业务状态标记。
-    pub business_status: Business,
-}
+pub struct Init;
 /// 表示任务已被人工或系统暂停的运行状态标记。
 #[derive(Debug, Clone)]
 pub struct Paused;
 
 /// 带有类型状态的任务实体。
 ///
-/// `RunSt` 用于在编译期表达任务当前所处的运行/业务状态。
+/// `St` 用于在编译期表达任务当前所处的单层状态。
 #[derive(Debug, Clone)]
-pub struct Job<RunSt> {
+pub struct Job<St> {
     /// 任务对应的镜像标识。
     pub mirror_id: Arc<str>,
     /// 任务当前携带的类型状态。
-    pub running_status: RunSt,
-}
-
-/// 为所有实现了 [`Default`](backend/src/manager/status.rs:38) 的业务状态自动提供默认运行态。
-impl<Biz: Default> Default for Running<Biz> {
-    fn default() -> Self {
-        Self {
-            business_status: Biz::default(),
-        }
-    }
+    pub state: St,
 }
 
 /// 擦除具体类型状态后的任务枚举，便于在运行时统一存储和分发。
 #[derive(Debug, Clone)]
 pub enum AnyJob {
-    Idle(Job<Idle>),
-    Pending(Job<Pending>),
-    Syncing(Job<Running<Syncing>>),
-    Verifying(Job<Running<Verifying>>),
-    Publishing(Job<Running<Publishing>>),
-    Success(Job<Running<Success>>),
-    Failed(Job<Running<Failed>>),
+    Init(Job<Init>),
+    Syncing(Job<Syncing>),
+    Verifying(Job<Verifying>),
+    Publishing(Job<Publishing>),
+    Success(Job<Success>),
+    Failed(Job<Failed>),
     Paused(Job<Paused>),
 }
 
@@ -72,8 +53,6 @@ pub enum Effect {
     QueueEnqueue { mirror_id: Arc<str> },
     /// 将任务从调度队列中移除
     QueueRemove { mirror_id: Arc<str> },
-    /// 持久化任务状态
-    Persist { mirror_id: Arc<str> },
     /// 启动同步执行器
     Sync { mirror_id: Arc<str> },
     /// 启动验证执行器
@@ -122,8 +101,7 @@ impl AnyJob {
     /// 返回当前任务状态对应的人类可读名称。
     pub fn state_name(&self) -> &'static str {
         match self {
-            AnyJob::Idle(_) => "Idle",
-            AnyJob::Pending(_) => "Pending",
+            AnyJob::Init(_) => "Init",
             AnyJob::Syncing(_) => "Syncing",
             AnyJob::Verifying(_) => "Verifying",
             AnyJob::Publishing(_) => "Publishing",
@@ -134,44 +112,38 @@ impl AnyJob {
     }
 }
 
-impl From<Job<Idle>> for AnyJob {
-    fn from(job: Job<Idle>) -> Self {
-        AnyJob::Idle(job)
+impl From<Job<Init>> for AnyJob {
+    fn from(job: Job<Init>) -> Self {
+        AnyJob::Init(job)
     }
 }
 
-impl From<Job<Pending>> for AnyJob {
-    fn from(job: Job<Pending>) -> Self {
-        AnyJob::Pending(job)
-    }
-}
-
-impl From<Job<Running<Syncing>>> for AnyJob {
-    fn from(job: Job<Running<Syncing>>) -> Self {
+impl From<Job<Syncing>> for AnyJob {
+    fn from(job: Job<Syncing>) -> Self {
         AnyJob::Syncing(job)
     }
 }
 
-impl From<Job<Running<Verifying>>> for AnyJob {
-    fn from(job: Job<Running<Verifying>>) -> Self {
+impl From<Job<Verifying>> for AnyJob {
+    fn from(job: Job<Verifying>) -> Self {
         AnyJob::Verifying(job)
     }
 }
 
-impl From<Job<Running<Publishing>>> for AnyJob {
-    fn from(job: Job<Running<Publishing>>) -> Self {
+impl From<Job<Publishing>> for AnyJob {
+    fn from(job: Job<Publishing>) -> Self {
         AnyJob::Publishing(job)
     }
 }
 
-impl From<Job<Running<Success>>> for AnyJob {
-    fn from(job: Job<Running<Success>>) -> Self {
+impl From<Job<Success>> for AnyJob {
+    fn from(job: Job<Success>) -> Self {
         AnyJob::Success(job)
     }
 }
 
-impl From<Job<Running<Failed>>> for AnyJob {
-    fn from(job: Job<Running<Failed>>) -> Self {
+impl From<Job<Failed>> for AnyJob {
+    fn from(job: Job<Failed>) -> Self {
         AnyJob::Failed(job)
     }
 }
@@ -191,244 +163,227 @@ pub trait Suspendable {
 /// 表示任务支持转移到失败态。
 pub trait Failable {
     /// 生成一次失败转换计划。
-    fn fail(self) -> TransitionPlan<Running<Failed>>;
+    fn fail(self) -> TransitionPlan<Failed>;
 }
 
-impl Job<Idle> {
-    /// 将任务从空闲状态注册进任务队列。
+impl Job<Init> {
+    /// 将任务注册到调度队列。
     ///
-    /// 会记录最新状态到持久化存储。
-    pub fn register(self) -> TransitionPlan<Pending> {
+    /// 状态保持为 [`Init`](src/manager/status.rs)，排队事实由队列本身表达。
+    pub fn register(self) -> TransitionPlan<Init> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Pending> {
+        let next = Job::<Init> {
             mirror_id: mirror_id.clone(),
-            running_status: Pending,
+            state: Init,
         };
-        let effects = vec![Effect::Persist {
-            mirror_id: mirror_id,
+
+        TransitionPlan::new(next).with_effect(Effect::QueueEnqueue { mirror_id })
+    }
+}
+
+impl Suspendable for Job<Init> {
+    /// 将任务从初始态切换为暂停状态。
+    ///
+    /// 如果任务当前在队列中，副作用会将其移出队列。
+    fn pause(self) -> TransitionPlan<Paused> {
+        let mirror_id = self.mirror_id;
+
+        let next = Job::<Paused> {
+            mirror_id: mirror_id.clone(),
+            state: Paused,
+        };
+        let effects = vec![Effect::QueueRemove {
+            mirror_id: mirror_id.clone(),
         }];
 
         TransitionPlan::new(next).with_effects(effects)
     }
 }
 
-// 为 Job<Pending> 实现可暂停
-impl Suspendable for Job<Pending> {
-    /// 将任务从入队状态切换为暂停状态。
-    ///
-    /// 会将任务移出队列，并记录最新状态到持久化存储。
+impl Suspendable for Job<Success> {
+    /// 将任务从成功态切换为暂停状态。
     fn pause(self) -> TransitionPlan<Paused> {
         let mirror_id = self.mirror_id;
 
         let next = Job::<Paused> {
             mirror_id: mirror_id.clone(),
-            running_status: Paused,
+            state: Paused,
         };
-        let effects = vec![
-            Effect::QueueRemove {
-                mirror_id: mirror_id.clone(),
-            },
-            Effect::Persist {
-                mirror_id: mirror_id,
-            },
-        ];
 
-        TransitionPlan::new(next).with_effects(effects)
+        TransitionPlan::new(next).with_effect(Effect::QueueRemove { mirror_id })
     }
 }
 
-impl Suspendable for Job<Idle> {
-    /// 将任务从已登但没入队状态切换为暂停状态。
-    ///
-    /// 记录最新状态到持久化存储。
+impl Suspendable for Job<Failed> {
+    /// 将任务从失败态切换为暂停状态。
     fn pause(self) -> TransitionPlan<Paused> {
         let mirror_id = self.mirror_id;
 
         let next = Job::<Paused> {
             mirror_id: mirror_id.clone(),
-            running_status: Paused,
+            state: Paused,
         };
-        let effects = vec![
-            Effect::Persist {
-                mirror_id: mirror_id,
-            },
-        ];
 
-        TransitionPlan::new(next).with_effects(effects)
+        TransitionPlan::new(next).with_effect(Effect::QueueRemove { mirror_id })
     }
 }
 
-impl Job<Pending> {
-    /// 将任务从任务队列里移出，进入执行器执行
-    ///
-    /// 并持久化任务状态
-    pub fn sync(self) -> TransitionPlan<Running<Syncing>> {
+impl Job<Init> {
+    /// 将初始态任务推进到同步阶段。
+    pub fn sync(self) -> TransitionPlan<Syncing> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Syncing>> {
+        let next = Job::<Syncing> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Syncing,
-            },
+            state: Syncing,
         };
-        let effects = vec![
-            Effect::Sync {
-                mirror_id: mirror_id.clone(),
-            },
-            Effect::Persist { mirror_id },
-        ];
+        let effects = vec![Effect::Sync {
+            mirror_id: mirror_id.clone(),
+        }];
 
         TransitionPlan::new(next).with_effects(effects)
     }
 }
 
-impl Job<Running<Syncing>> {
+impl Job<Success> {
+    /// 将成功态任务重新推进到同步阶段。
+    pub fn sync(self) -> TransitionPlan<Syncing> {
+        let mirror_id = self.mirror_id;
+
+        let next = Job::<Syncing> {
+            mirror_id: mirror_id.clone(),
+            state: Syncing,
+        };
+        let effects = vec![Effect::Sync {
+            mirror_id: mirror_id.clone(),
+        }];
+
+        TransitionPlan::new(next).with_effects(effects)
+    }
+}
+
+impl Job<Failed> {
+    /// 将失败态任务重新推进到同步阶段。
+    pub fn sync(self) -> TransitionPlan<Syncing> {
+        let mirror_id = self.mirror_id;
+
+        let next = Job::<Syncing> {
+            mirror_id: mirror_id.clone(),
+            state: Syncing,
+        };
+        let effects = vec![Effect::Sync {
+            mirror_id: mirror_id.clone(),
+        }];
+
+        TransitionPlan::new(next).with_effects(effects)
+    }
+}
+
+impl Job<Syncing> {
     /// 将任务从同步中状态推进到校验中状态。
     ///
     /// 会记录最新状态到持久化存储。
-    pub fn verify(self) -> TransitionPlan<Running<Verifying>> {
+    pub fn verify(self) -> TransitionPlan<Verifying> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Verifying>> {
+        let next = Job::<Verifying> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Verifying,
-            },
+            state: Verifying,
         };
-        let effects = vec![
-            Effect::Verify {
-                mirror_id: mirror_id.clone(),
-            },
-            Effect::Persist {
-                mirror_id: mirror_id,
-            },
-        ];
+        let effects = vec![Effect::Verify {
+            mirror_id: mirror_id.clone(),
+        }];
 
         TransitionPlan::new(next).with_effects(effects)
     }
 }
 
-impl Job<Running<Verifying>> {
+impl Job<Verifying> {
     /// 将任务从校验中状态推进到发布中状态。
     ///
     /// 会记录最新状态到持久化存储。
-    pub fn publish(self) -> TransitionPlan<Running<Publishing>> {
+    pub fn publish(self) -> TransitionPlan<Publishing> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Publishing>> {
+        let next = Job::<Publishing> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Publishing,
-            },
+            state: Publishing,
         };
-        let effects = vec![
-            Effect::Publish {
-                mirror_id: mirror_id.clone(),
-            },
-            Effect::Persist {
-                mirror_id: mirror_id,
-            },
-        ];
-
-        TransitionPlan::new(next).with_effects(effects)
-    }
-}
-
-impl Job<Running<Publishing>> {
-    /// 将任务从发布中状态推进到成功状态。
-    ///
-    /// 会记录最新状态到持久化存储。
-    pub fn succeed(self) -> TransitionPlan<Running<Success>> {
-        let mirror_id = self.mirror_id;
-
-        let next = Job::<Running<Success>> {
+        let effects = vec![Effect::Publish {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Success,
-            },
-        };
-        let effects = vec![Effect::Persist {
-            mirror_id: mirror_id,
         }];
 
         TransitionPlan::new(next).with_effects(effects)
     }
 }
 
-impl Failable for Job<Running<Syncing>> {
+impl Job<Publishing> {
+    /// 将任务从发布中状态推进到成功状态。
+    pub fn succeed(self) -> TransitionPlan<Success> {
+        let mirror_id = self.mirror_id;
+
+        let next = Job::<Success> {
+            mirror_id: mirror_id.clone(),
+            state: Success,
+        };
+
+        TransitionPlan::new(next)
+    }
+}
+
+impl Failable for Job<Syncing> {
     /// 将任务从同步中状态转移到失败状态。
     ///
     /// 会记录最新状态到持久化存储。
-    fn fail(self) -> TransitionPlan<Running<Failed>> {
+    fn fail(self) -> TransitionPlan<Failed> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Failed>> {
+        let next = Job::<Failed> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Failed,
-            },
+            state: Failed,
         };
-        let effects = vec![Effect::Persist {
-            mirror_id: mirror_id,
-        }];
 
-        TransitionPlan::new(next).with_effects(effects)
+        TransitionPlan::new(next)
     }
 }
 
-impl Failable for Job<Running<Verifying>> {
+impl Failable for Job<Verifying> {
     /// 将任务从校验中状态转移到失败状态。
-    ///
-    /// 会记录最新状态到持久化存储。
-    fn fail(self) -> TransitionPlan<Running<Failed>> {
+    fn fail(self) -> TransitionPlan<Failed> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Failed>> {
+        let next = Job::<Failed> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Failed,
-            },
+            state: Failed,
         };
-        let effects = vec![Effect::Persist {
-            mirror_id: mirror_id,
-        }];
 
-        TransitionPlan::new(next).with_effects(effects)
+        TransitionPlan::new(next)
     }
 }
 
-impl Failable for Job<Running<Publishing>> {
+impl Failable for Job<Publishing> {
     /// 将任务从发布中状态转移到失败状态。
-    ///
-    /// 会记录最新状态到持久化存储。
-    fn fail(self) -> TransitionPlan<Running<Failed>> {
+    fn fail(self) -> TransitionPlan<Failed> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Failed>> {
+        let next = Job::<Failed> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Failed,
-            },
+            state: Failed,
         };
-        let effects = vec![Effect::Persist {
-            mirror_id: mirror_id,
-        }];
 
-        TransitionPlan::new(next).with_effects(effects)
+        TransitionPlan::new(next)
     }
 }
 
-impl Job<Running<Success>> {
-    /// 将任务从成功状态回到空闲状态。
-    ///
-    /// 会将任务重新加入队列，等待下一次调度。
-    pub fn idle(self) -> TransitionPlan<Idle> {
+impl Job<Success> {
+    /// 将成功态任务重新加入队列，但保持成功状态不变。
+    pub fn enqueue(self) -> TransitionPlan<Success> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Idle> {
+        let next = Job::<Success> {
             mirror_id: mirror_id.clone(),
-            running_status: Idle,
+            state: Success,
         };
         let effects = vec![Effect::QueueEnqueue {
             mirror_id: mirror_id,
@@ -438,16 +393,14 @@ impl Job<Running<Success>> {
     }
 }
 
-impl Job<Running<Failed>> {
-    /// 将任务从失败状态回到空闲状态。
-    ///
-    /// 会将任务重新加入队列，等待下一次调度。
-    pub fn idle(self) -> TransitionPlan<Idle> {
+impl Job<Failed> {
+    /// 将失败态任务重新加入队列，但保持失败状态不变。
+    pub fn enqueue(self) -> TransitionPlan<Failed> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Idle> {
+        let next = Job::<Failed> {
             mirror_id: mirror_id.clone(),
-            running_status: Idle,
+            state: Failed,
         };
         let effects = vec![Effect::QueueEnqueue {
             mirror_id: mirror_id,
@@ -458,28 +411,20 @@ impl Job<Running<Failed>> {
 }
 
 impl Job<Paused> {
-    /// 将任务从暂停状态恢复到运行态（成功分支起点）。
+    /// 将任务从暂停状态恢复到初始态，并重新加入队列。
     ///
-    /// 会将任务重新加入队列，并记录最新状态到持久化存储。
-    pub fn resume(self) -> TransitionPlan<Running<Success>> {
+    /// 会将任务重新加入队列
+    pub fn resume(self) -> TransitionPlan<Init> {
         let mirror_id = self.mirror_id;
 
-        let next = Job::<Running<Success>> {
+        let next = Job::<Init> {
             mirror_id: mirror_id.clone(),
-            running_status: Running {
-                business_status: Success,
-            },
+            state: Init,
         };
-        let effects = vec![
-            Effect::QueueEnqueue {
-                mirror_id: mirror_id.clone(),
-            },
-            Effect::Persist {
-                mirror_id: mirror_id,
-            },
-        ];
+        let effects = vec![Effect::QueueEnqueue {
+            mirror_id: mirror_id.clone(),
+        }];
 
         TransitionPlan::new(next).with_effects(effects)
     }
 }
-
