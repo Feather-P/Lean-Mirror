@@ -21,7 +21,6 @@ pub struct Manager {
     lifecycle_event_rx: mpsc::Receiver<LifeCycleEvent>,
     control_event_rx: mpsc::Receiver<ControlEvent>,
     worker_event_rx: mpsc::Receiver<WorkerEvent>,
-    worker_cmd_tx: mpsc::Sender<WorkerCommand>,
 }
 
 impl Manager {
@@ -39,7 +38,6 @@ impl Manager {
             lifecycle_event_rx,
             control_event_rx,
             worker_event_rx,
-            worker_cmd_tx,
         }
     }
 
@@ -94,8 +92,6 @@ impl Manager {
                 }
             }
         }
-
-        Ok(())
     }
 
     /// 处理上游网页或命令行前端发来的控制事件。
