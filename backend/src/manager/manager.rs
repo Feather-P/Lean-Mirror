@@ -6,12 +6,15 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::manager::event::LifeCycleEvent;
+use crate::manager::status::{Failable, Suspendable};
 
 use super::error::ManagerError;
 use super::event::{ControlEvent, WorkerCommand, WorkerEvent};
 use super::queue::JobQueue;
 use super::status::AnyJob;
+use super::status::{Effect, Job, TransitionPlan};
 
+/// 负责协调任务状态机、调度队列与 worker 事件的中心管理器。
 pub struct Manager {
     jobs: HashMap<Arc<str>, AnyJob>,
     queue: JobQueue,
@@ -22,12 +25,14 @@ pub struct Manager {
 }
 
 impl Manager {
-    pub fn new(
+    /// 初始化 [`Manager`](backend/src/manager/manager.rs:18)，并绑定所需的事件通道。
+    pub fn init(
         lifecycle_event_rx: mpsc::Receiver<LifeCycleEvent>,
         control_event_rx: mpsc::Receiver<ControlEvent>,
         worker_event_rx: mpsc::Receiver<WorkerEvent>,
         worker_cmd_tx: mpsc::Sender<WorkerCommand>,
     ) -> Self {
+        // 这里要从配置文件和数据库装载所有的任务列表
         Self {
             jobs: HashMap::new(),
             queue: JobQueue::new(),
@@ -52,7 +57,7 @@ impl Manager {
                     let Some(lifecycle_event) = maybe_lifecycle_event
                     else {
                         return Err(ManagerError::ChannelClosed {
-                            channel_name: "lifecycle event"
+                            channel_name: "lifecycle event".into()
                         })
                     };
 
@@ -63,7 +68,7 @@ impl Manager {
                     let Some(control_event) = maybe_control_event
                     else {
                         return Err(ManagerError::ChannelClosed {
-                            channel_name: "control event"
+                            channel_name: "control event".into()
                         })
                     };
 
@@ -74,11 +79,11 @@ impl Manager {
                     let Some(worker_event) = maybe_worker_event
                     else {
                         return Err(ManagerError::ChannelClosed {
-                            channel_name: "worker event"
+                            channel_name: "worker event".into()
                         })
                     };
 
-                    self.handle_worker_event(worker_event);
+                    self.handle_worker_event(worker_event).await?;
                 }
                 _ = async {
                     if let Some(deadline) = next_tick_time {
@@ -93,7 +98,9 @@ impl Manager {
         Ok(())
     }
 
-    /// 处理上游网页或命令行前端发来的业务控制事件，更新任务状态机，重新安排任务队列，
+    /// 处理上游网页或命令行前端发来的控制事件。
+    ///
+    /// 该方法会依据事件类型推进任务状态机，并在需要时调整调度队列。
     async fn handle_control_event(
         &mut self,
         control_event: ControlEvent,
@@ -109,7 +116,7 @@ impl Manager {
             ControlEvent::Pause { mirror_id } => {
                 let Some(any_job) = self.jobs.remove(mirror_id.as_str()) else {
                     return Err(ManagerError::JobNotFound {
-                        job_mirror_id: &mirror_id,
+                        job_mirror_id: mirror_id.into(),
                     });
                 };
 
@@ -120,7 +127,12 @@ impl Manager {
                         Ok(())
                     }
                     AnyJob::Pending(job) => self.apply_plan(job.pause()).await,
-                    AnyJob::Idle(job) => todo!(),
+                    AnyJob::Idle(_) => {
+                        return Err(ManagerError::InvalidTransition {
+                            from: "Idle".into(),
+                            to: "Paused".into(),
+                        });
+                    }
                     AnyJob::Syncing(job) => todo!(),
                     AnyJob::Verifying(job) => todo!(),
                     AnyJob::Publishing(job) => todo!(),
@@ -134,9 +146,43 @@ impl Manager {
         }
     }
 
-    /// 处理 'worker' 上报的事件信息，并根据信息更新任务状态机、队列，和持久化
-    fn handle_worker_event(&mut self, worker_event: WorkerEvent) -> Result<(), ManagerError> {
-        todo!("还没有实现")
+    /// 处理 worker 上报的事件，并据此推进任务状态机。
+    ///
+    /// 当事件与当前任务状态不匹配时，会返回 [`ManagerError::InvalidTransition`](backend/src/manager/error.rs:10)。
+    async fn handle_worker_event(&mut self, worker_event: WorkerEvent) -> Result<(), ManagerError> {
+        let mirror_id = match &worker_event {
+            WorkerEvent::SyncSucceeded { mirror_id, .. }
+            | WorkerEvent::SyncFailed { mirror_id, .. }
+            | WorkerEvent::VerifySucceeded { mirror_id, .. }
+            | WorkerEvent::VerifyFailed { mirror_id, .. }
+            | WorkerEvent::PublishSucceeded { mirror_id, .. }
+            | WorkerEvent::PublishFailed { mirror_id, .. } => mirror_id.clone(),
+        };
+
+        let Some(any_job) = self.jobs.remove(mirror_id.as_str()) else {
+            return Err(ManagerError::JobNotFound {
+                job_mirror_id: mirror_id,
+            });
+        };
+
+        match (any_job, worker_event) {
+            (AnyJob::Syncing(job), WorkerEvent::SyncSucceeded { .. }) => self.apply_plan(job.verify()).await,
+            (AnyJob::Verifying(job), WorkerEvent::VerifySucceeded { .. }) => self.apply_plan(job.publish()).await,
+            (AnyJob::Publishing(job), WorkerEvent::PublishSucceeded { .. }) => self.apply_plan(job.succeed()).await,
+
+            (AnyJob::Syncing(job), WorkerEvent::SyncFailed { .. }) => self.apply_plan(job.fail()).await,
+            (AnyJob::Verifying(job), WorkerEvent::VerifyFailed { .. }) => self.apply_plan(job.fail()).await,
+            (AnyJob::Publishing(job), WorkerEvent::PublishFailed { .. }) => self.apply_plan(job.fail()).await,
+
+            (job, event) => {
+                let from = job.state_name().to_string();
+                self.jobs.insert(mirror_id.into(), job);
+                Err(ManagerError::InvalidTransition {
+                    from,
+                    to: format!("worker_event::{event:?}"),
+                })
+            }
+        }
     }
 
     /// 处理队列中所有已到期的任务
@@ -158,9 +204,34 @@ impl Manager {
 
         Ok(())
     }
+
+    /// 应用一次状态机转换计划。
+    ///
+    /// 该方法会先写回新的任务状态，再顺序执行转换附带的副作用。
+    pub async fn apply_plan<NextSt>(
+        &mut self,
+        plan: TransitionPlan<NextSt>,
+    ) -> Result<(), ManagerError>
+    where
+        Job<NextSt>: Into<AnyJob>,
+    {   
+        //TODO 这里有问题，合理的流程应该是：manager中状态机发生转换
+        //     然后spawn异步一个新的worker线程去执行effect内的内容
+        //     effect执行完毕之后，通过channel向manager汇报，
+        //.    manager收到汇报之后，落库，然后发生下一次状态机转换，spawn一个新的worker线程，重复
+        let key = plan.next.mirror_id.clone();
+        let new_job = plan.next.into();
+        self.jobs.insert(key, new_job);
+        match do_effects(plan.effects).await {
+            Ok(_) => {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+    }
 }
 
-/// 将 'chrono::DateTime<Utc>' 时间转换为 'tokio::time::instant
+/// 将 [`chrono::DateTime<Utc>`](backend/src/manager/manager.rs:236) 转换为 [`tokio::time::Instant`](backend/src/manager/manager.rs:236)。
 fn to_instant(time_utc: chrono::DateTime<Utc>) -> Instant {
     let now_utc = Utc::now();
     let now_instant = Instant::now();
@@ -169,4 +240,9 @@ fn to_instant(time_utc: chrono::DateTime<Utc>) -> Instant {
     let diff = (time_utc - now_utc).to_std().unwrap_or(Duration::ZERO);
 
     now_instant + diff
+}
+
+/// 顺序执行状态转换过程中产生的副作用列表。
+async fn do_effects(effects: Vec<Effect>) -> Result<(), ManagerError> {
+    todo!()
 }

@@ -23,10 +23,6 @@ pub enum WorkerCommand {
 /// Worker发送的事件消息
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
-    SyncStarted {
-        mirror_id: String,
-        started_at: DateTime<Utc>,
-    },
     SyncSucceeded {
         mirror_id: String,
         finished_at: DateTime<Utc>,
@@ -36,10 +32,6 @@ pub enum WorkerEvent {
         finished_at: DateTime<Utc>,
         error: String,
     },
-    VerifyStarted {
-        mirror_id: String,
-        started_at: DateTime<Utc>,
-    },
     VerifySucceeded {
         mirror_id: String,
         finished_at: DateTime<Utc>,
@@ -47,10 +39,6 @@ pub enum WorkerEvent {
     VerifyFailed {
         mirror_id: String,
         finished_at: DateTime<Utc>,
-    },
-    PublishStarted {
-        mirror_id: String,
-        started_at: DateTime<Utc>,
     },
     PublishSucceeded {
         mirror_id: String,
