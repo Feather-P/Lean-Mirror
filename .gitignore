@@ -1,1 +1,11 @@
-.vscode*
+# targets
+target
+
+# cargo
+Cargo.lock
+
+# only apple can do
+.DS_STORE
+
+# counter
+.VSCodeCounter
