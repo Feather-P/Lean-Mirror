@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::repository::RepositoryError;
+
 /// 管理器在调度、状态转换与通道交互过程中可能返回的错误。
 #[derive(Debug, Error)]
 pub enum ManagerError {
@@ -8,5 +10,7 @@ pub enum ManagerError {
     #[error("{job_mirror_id} Job not found")]
     JobNotFound { job_mirror_id: String },
     #[error("invalid transition: {from} to {to}")]
-    InvalidTransition { from: String, to: String }
+    InvalidTransition { from: String, to: String },
+    #[error(transparent)]
+    Repository(#[from] RepositoryError),
 }

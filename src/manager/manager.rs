@@ -7,6 +7,7 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::manager::event::LifeCycleEvent;
 use crate::manager::status::{Failable, Suspendable};
+use crate::repository::{JobRepository, JobStateRecord};
 
 use super::error::ManagerError;
 use super::event::{ControlEvent, WorkerCommand, WorkerEvent};
@@ -18,6 +19,7 @@ use super::status::{Effect, Job, TransitionPlan};
 pub struct Manager {
     jobs: HashMap<Arc<str>, AnyJob>,
     queue: JobQueue,
+    repository: Arc<dyn JobRepository>,
     lifecycle_event_rx: mpsc::Receiver<LifeCycleEvent>,
     control_event_rx: mpsc::Receiver<ControlEvent>,
     worker_event_rx: mpsc::Receiver<WorkerEvent>,
@@ -26,6 +28,7 @@ pub struct Manager {
 impl Manager {
     /// 初始化 [`Manager`](backend/src/manager/manager.rs:18)，并绑定所需的事件通道。
     pub fn init(
+        repository: Arc<dyn JobRepository>,
         lifecycle_event_rx: mpsc::Receiver<LifeCycleEvent>,
         control_event_rx: mpsc::Receiver<ControlEvent>,
         worker_event_rx: mpsc::Receiver<WorkerEvent>,
@@ -35,6 +38,7 @@ impl Manager {
         Self {
             jobs: HashMap::new(),
             queue: JobQueue::new(),
+            repository,
             lifecycle_event_rx,
             control_event_rx,
             worker_event_rx,
@@ -226,7 +230,10 @@ impl Manager {
         //     effect执行完毕之后，通过channel向manager汇报，
         //.    manager收到汇报之后，落库，然后发生下一次状态机转换，spawn一个新的worker线程，重复
         let key = plan.next.mirror_id.clone();
-        let new_job = plan.next.into();
+        let new_job: AnyJob = plan.next.into();
+        let state_record = JobStateRecord::from_job(&new_job);
+
+        self.repository.upsert_job_state(&state_record).await?;
         self.jobs.insert(key, new_job);
         match do_effects(plan.effects).await {
             Ok(_) => {
